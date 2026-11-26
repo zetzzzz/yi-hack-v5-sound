@@ -37,7 +37,7 @@ Tested with Frigate 0.18.2 (go2rtc 1.9.14) and the Home Assistant Advanced Camer
 - Speech was muffled/quiet (fixed 2026-11-18, ear-confirmed 2026-11-26: clearer). The μ-law oversampling filter was a low-pass (~318 Hz cutoff) attenuating speech above ~1 kHz (measured gain ~0.46). It is replaced by linear interpolation + ×2 gain — measured 4.3× louder at 1 kHz and 13.8× at 3 kHz, no clipping.
 - `speak.sh` TTS reports "TTS engine not found" — `nanotts` was not ported; only the Speak page's TTS feature is affected, not WebRTC talk.
 - `DEPLOY.md` describes the earlier shim-based deploy plan and is partly out of date (it lists the pre-fix server binary and `RTSP_AUDIO_BC=aac`).
-- Binary assets are not in this repository: the WebUI images, watermark bitmaps, runtime `.so` libraries, `defaults.tar.bz2`, and the prebuilt `ao_daemon` binaries are not uploaded (the upload used here is text-only). Get the upstream binary assets from [alienatedsec/yi-hack-v5](https://github.com/alienatedsec/yi-hack-v5), and build `ao_daemon` from source (see Building below).
+- Binary assets are included in this repository: the WebUI images, watermark bitmaps, runtime `.so` libraries, `defaults.tar.bz2`, and the prebuilt `ao_daemon` binaries are all present, so the firmware can be used without rebuilding from upstream.
 
 ## Building
 
