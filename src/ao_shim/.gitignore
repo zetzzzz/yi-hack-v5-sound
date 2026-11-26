@@ -1,0 +1,4 @@
+_install/
+*.o
+libao_shim.so
+libao_shim_test.so

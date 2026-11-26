@@ -1,0 +1,68 @@
+diff -Naur live.ori/config.linux-cross live/config.linux-cross
+--- live.ori/config.linux-cross	1970-01-01 01:00:00.000000000 +0100
++++ live/config.linux-cross	2021-02-18 10:39:28.103846011 +0100
+@@ -0,0 +1,17 @@
++COMPILE_OPTS =		$(INCLUDES) -I. -O1 -ffunction-sections -fdata-sections -DSOCKLEN_T=socklen_t -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -DNO_OPENSSL=1 -DRTP_PAYLOAD_MAX_SIZE=1352 -DNEWLOCALE_NOT_USED
++C =			c
++C_COMPILER =		$(CC)
++C_FLAGS =		$(COMPILE_OPTS) $(CPPFLAGS) $(CFLAGS)
++CPP =			cpp
++CPLUSPLUS_COMPILER =	$(CXX)
++CPLUSPLUS_FLAGS =	$(COMPILE_OPTS) -Wall -DBSD=1 $(CPPFLAGS) $(CXXFLAGS)
++OBJ =			o
++LINK =			$(CXX) -o
++LINK_OPTS =		-Wl,--gc-sections -L. $(LDFLAGS)
++CONSOLE_LINK_OPTS =	$(LINK_OPTS)
++LIBRARY_LINK =		$(AR) cr 
++LIBRARY_LINK_OPTS =	
++LIB_SUFFIX =			a
++LIBS_FOR_CONSOLE_APPLICATION =
++LIBS_FOR_GUI_APPLICATION =
++EXE =
+diff -Naur live.ori/liveMedia/H264or5VideoStreamFramer.cpp live/liveMedia/H264or5VideoStreamFramer.cpp
+--- live.ori/liveMedia/H264or5VideoStreamFramer.cpp	2020-04-06 15:57:15.000000000 +0200
++++ live/liveMedia/H264or5VideoStreamFramer.cpp	2020-04-08 19:14:51.000000000 +0200
+@@ -86,7 +86,7 @@
+   fParser = createParser
+     ? new H264or5VideoStreamParser(hNumber, this, inputSource, includeStartCodeInOutput)
+     : NULL;
+-  fFrameRate = 30.0; // We assume a frame rate of 30 fps, unless we learn otherwise (from parsing a VPS or SPS NAL unit)
++  fFrameRate = 20.0; // We assume a frame rate of 20 fps, unless we learn otherwise (from parsing a VPS or SPS NAL unit)
+ }
+ 
+ H264or5VideoStreamFramer::~H264or5VideoStreamFramer() {
+@@ -1195,8 +1195,13 @@
+       nextPT = usingSource()->fPresentationTime;
+       double nextFraction = nextPT.tv_usec/1000000.0 + 1/usingSource()->fFrameRate;
+       unsigned nextSecsIncrement = (long)nextFraction;
++#ifndef PRES_TIME_CLOCK
+       nextPT.tv_sec += (long)nextSecsIncrement;
+       nextPT.tv_usec = (long)((nextFraction - nextSecsIncrement)*1000000);
++#else
++      // Use system clock to set presentation time
++      gettimeofday(&nextPT, NULL);
++#endif
+     }
+     setParseState();
+ 
+diff -Naur live.ori/liveMedia/ServerMediaSession.cpp live/liveMedia/ServerMediaSession.cpp
+--- live.ori/liveMedia/ServerMediaSession.cpp	2026-11-16 17:25:44.151084738 +0000
++++ live/liveMedia/ServerMediaSession.cpp	2026-11-16 17:25:44.152929917 +0000
+@@ -272,7 +272,7 @@
+ 
+     char const* const sdpPrefixFmt =
+       "v=0\r\n"
+-      "o=- %ld%06ld %d IN %s %s\r\n"
++      "o=- %lld%06lld %d IN %s %s\r\n"
+       "s=%s\r\n"
+       "i=%s\r\n"
+       "t=0 0\r\n"
+@@ -300,7 +300,7 @@
+ 
+     // Generate the SDP prefix (session-level lines):
+     snprintf(sdp, sdpLength, sdpPrefixFmt,
+-	     fCreationTime.tv_sec, fCreationTime.tv_usec, // o= <session id>
++	     (long long)fCreationTime.tv_sec, (long long)fCreationTime.tv_usec, // o= <session id>
+ 	     1, // o= <version> // (needs to change if params are modified)
+ 	     addressFamily == AF_INET ? "IP4" : "IP6", // o= <address family>
+ 	     ipAddressStr.val(), // o= <address>

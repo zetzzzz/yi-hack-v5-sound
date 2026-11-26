@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# NOTE (yi-hack-v5 port): the hisiv300 toolchain (/opt/arm-hisiv300-linux)
+# is not obtainable, so this uses the Debian arm-linux-gnueabi toolchain.
+# The binary is linked statically (-static via LDFLAGS): the camera runs
+# uClibc, so a glibc-dynamic binary would not run there. The tone test
+# proved Debian-built static ARM binaries run on the Hi3518ev200 camera.
+export TARGET=arm-linux-gnueabi
+export CROSS=arm-linux-gnueabi
+export BUILD=x86_64-pc-linux-gnu
+
+export CROSSPREFIX=${CROSS}-
+
+export STRIP=${CROSSPREFIX}strip
+export CXX=${CROSSPREFIX}g++
+export CC=${CROSSPREFIX}gcc
+export LD=${CROSSPREFIX}ld
+export AS=${CROSSPREFIX}as
+export AR=${CROSSPREFIX}ar
+export LDFLAGS="-static"
+
+SCRIPT_DIR=$(cd `dirname $0` && pwd)
+cd $SCRIPT_DIR
+
+# fdk-aac (backchannel AAC -> PCM decode, static lib only)
+cd fdk-aac || exit 1
+make clean
+make || exit 1
+make install
+mkdir ../live/lib/
+cp -f ./_install/lib/libfdk-aac.a ../live/lib/
+cp -rf ./_install/include/* ../live/include/
+cd ..
+
+# NOTE (yi-hack-v5 fork, 2026-11-17): live/src/ and live/include/ are
+# COPIES of ../src/ and ../include/ (made by init.rRTSPServer), and
+# `make clean` in live/ does NOT remove live/src/*.o — so editing a file
+# under ../src/ and re-running this script used to link a STALE binary
+# without any error (caught 2026-11-17: the rebuilt rRTSPServer lacked
+# the OnDemandServerMediaSubsession_BC + rRTSPServer.cpp fixes). Sync the
+# copies first so a rebuild always reflects the current fork sources.
+cp -rf src/. live/src/ || exit 1
+cp -rf include/. live/include/ || exit 1
+
+cd live || exit 1
+make clean
+make || exit 1
+
+mkdir -p ../_install/bin || exit 1
+
+cp ./rRTSPServer ../_install/bin || exit 1
+
+arm-linux-gnueabi-strip ../_install/bin/* || exit 1
+
+cd ../_install/bin/

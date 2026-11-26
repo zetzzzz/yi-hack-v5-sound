@@ -1,0 +1,166 @@
+# live555-reuseport-fix.patch (yi-hack-v5 fork, 2026-11-17)
+#
+# Root cause (PROVEN, Jev 0.93 — see hidden_files/wedge-diagnosis.md):
+# setsockopt(SO_REUSEPORT) fails on the camera's kernel 3.4.35 (the
+# option needs Linux 3.9), so setupDatagramSocket() returned -1 on every
+# call and the unbounded port-allocation loop in getStreamParameters()
+# spun forever on the first RTSP SETUP, wedging the event loop.
+#
+# This patch (applied by init.rRTSPServer after rRTSPServer.patch and
+# friend.patch) does four things:
+#  1. GroupsockHelper.cpp — remove the SO_REUSEPORT setsockopt in
+#     setupDatagramSocket() and setupStreamSocket() (the stock binary
+#     proves it is not needed).
+#  2. OnDemandServerMediaSubsession.cpp — bound both port-allocation
+#     loops to 100 attempts; on exhaustion delete the groupsocks, close
+#     the media source, set an error result and return with a NULL
+#     streamToken instead of spinning forever.
+#  3. RTSPServer.cpp — handleCmd_SETUP_afterLookup2(): if
+#     getStreamParameters() left a NULL streamToken, answer
+#     "500 Internal Server Error" instead of a bogus "200 OK".
+#     (Stock live555 never checks the token; the void return contract
+#     leaves NULL streamToken as the only failure signal.)
+#
+# Format: diff -Naur, same as rRTSPServer.patch / friend.patch;
+# applied with `patch -p0` from src/rRTSPServer/.
+--- live.ori/groupsock/GroupsockHelper.cpp
++++ live/groupsock/GroupsockHelper.cpp
+@@ -133,12 +133,11 @@
+   // Windoze doesn't properly handle SO_REUSEPORT or IP_MULTICAST_LOOP
+ #else
+ #ifdef SO_REUSEPORT
+-  if (setsockopt(newSocket, SOL_SOCKET, SO_REUSEPORT,
+-		 (const char*)&reuseFlag, sizeof reuseFlag) < 0) {
+-    socketErr(env, "setsockopt(SO_REUSEPORT) error: ");
+-    closeSocket(newSocket);
+-    return -1;
+-  }
++  // NOTE (yi-hack-v5 fork, 2026-11-17): SO_REUSEPORT was REMOVED here.
++  // It needs Linux 3.9+, but the camera runs kernel 3.4.35, so this
++  // setsockopt failed with ENOPROTOOPT on every call and
++  // setupDatagramSocket() returned -1, wedging the RTSP SETUP
++  // port-allocation loop. The stock binary serves fine without it.
+ #endif
+ 
+ #ifdef IP_MULTICAST_LOOP
+@@ -320,12 +319,9 @@
+   // Windoze doesn't properly handle SO_REUSEPORT
+ #else
+ #ifdef SO_REUSEPORT
+-  if (setsockopt(newSocket, SOL_SOCKET, SO_REUSEPORT,
+-		 (const char*)&reuseFlag, sizeof reuseFlag) < 0) {
+-    socketErr(env, "setsockopt(SO_REUSEPORT) error: ");
+-    closeSocket(newSocket);
+-    return -1;
+-  }
++  // NOTE (yi-hack-v5 fork, 2026-11-17): SO_REUSEPORT setsockopt REMOVED
++  // here too (same reason as setupDatagramSocket: fails with
++  // ENOPROTOOPT on the camera's kernel 3.4.35, which predates Linux 3.9).
+ #endif
+ #endif
+ #endif
+--- live.ori/liveMedia/OnDemandServerMediaSubsession.cpp
++++ live/liveMedia/OnDemandServerMediaSubsession.cpp
+@@ -134,10 +134,26 @@
+       if (clientRTCPPort.num() == 0) {
+ 	// We're streaming raw UDP (not RTP). Create a single groupsock:
+ 	NoReuse dummy(envir()); // ensures that we skip over ports that are already in use
+-	for (serverPortNum = fInitialPortNum; ; ++serverPortNum) {
++	// NOTE (yi-hack-v5 fork, 2026-11-17): bounded attempts (was an
++	// unbounded for(;;)). If setupDatagramSocket() fails on every
++	// attempt (e.g. a setsockopt the kernel does not support), an
++	// unbounded loop spins forever and wedges the single-threaded
++	// event loop. Fail cleanly instead: the caller sees a NULL
++	// streamToken and returns an RTSP error response.
++	unsigned numPortAttempts = 0;
++	for (serverPortNum = fInitialPortNum; numPortAttempts < 100; ++serverPortNum) {
++	  ++numPortAttempts;
+ 	  serverRTPPort = serverPortNum;
+ 	  rtpGroupsock = createGroupsock(nullAddress(destinationAddress.ss_family), serverRTPPort);
+ 	  if (rtpGroupsock->socketNum() >= 0) break; // success
++	  delete rtpGroupsock; rtpGroupsock = NULL;
++	}
++	if (rtpGroupsock == NULL || rtpGroupsock->socketNum() < 0) {
++	  delete rtpGroupsock; rtpGroupsock = NULL;
++	  Medium::close(mediaSource);
++	  envir().setResultErrMsg("Unable to allocate a server port for raw UDP streaming");
++	  streamToken = NULL;
++	  return;
+ 	}
+ 
+ 	udpSink = BasicUDPSink::createNew(envir(), rtpGroupsock);
+@@ -146,11 +162,21 @@
+ 	// groupsocks (RTP and RTCP), with adjacent port numbers (RTP port number even).
+ 	// (If we're multiplexing RTCP and RTP over the same port number, it can be odd or even.)
+ 	NoReuse dummy(envir()); // ensures that we skip over ports that are already in use
+-	for (portNumBits serverPortNum = fInitialPortNum; ; ++serverPortNum) {
++	// NOTE (yi-hack-v5 fork, 2026-11-17): bounded attempts (was an
++	// unbounded for(;;)). If setupDatagramSocket() fails on every
++	// attempt (e.g. a setsockopt the kernel does not support), an
++	// unbounded loop spins forever and wedges the single-threaded
++	// event loop. Fail cleanly instead: the caller sees a NULL
++	// streamToken and returns an RTSP error response.
++	unsigned numPortAttempts = 0;
++	Boolean createdGroupsocks = False;
++	for (portNumBits serverPortNum = fInitialPortNum; numPortAttempts < 100; ++serverPortNum) {
++	  ++numPortAttempts;
+ 	  serverRTPPort = serverPortNum;
+ 	  rtpGroupsock = createGroupsock(nullAddress(destinationAddress.ss_family), serverRTPPort);
+ 	  if (rtpGroupsock->socketNum() < 0) {
+ 	    delete rtpGroupsock;
++	    rtpGroupsock = NULL; rtcpGroupsock = NULL;
+ 	    continue; // try again
+ 	  }
+ 
+@@ -165,12 +191,26 @@
+ 	    if (rtcpGroupsock->socketNum() < 0) {
+ 	      delete rtpGroupsock;
+ 	      delete rtcpGroupsock;
++	      rtpGroupsock = NULL; rtcpGroupsock = NULL;
+ 	      continue; // try again
+ 	    }
+ 	  }
+ 
++	  createdGroupsocks = True;
+ 	  break; // success
+ 	}
++	if (!createdGroupsocks) {
++	  // No usable RTP/RTCP port pair after 100 attempts: give up
++	  // cleanly rather than spinning forever. (rtcpGroupsock may
++	  // alias rtpGroupsock when RTCP is multiplexed with RTP.)
++	  if (rtcpGroupsock != NULL && rtcpGroupsock != rtpGroupsock) delete rtcpGroupsock;
++	  delete rtpGroupsock;
++	  rtpGroupsock = NULL; rtcpGroupsock = NULL;
++	  Medium::close(mediaSource);
++	  envir().setResultErrMsg("Unable to allocate server ports for RTP/RTCP streaming");
++	  streamToken = NULL;
++	  return;
++	}
+ 
+ 	unsigned char rtpPayloadType = 96 + trackNumber()-1; // if dynamic
+ 	rtpSink = mediaSource == NULL ? NULL
+--- live.ori/liveMedia/RTSPServer.cpp
++++ live/liveMedia/RTSPServer.cpp
+@@ -1587,6 +1587,22 @@
+ 				    destinationAddress, destinationTTL, fIsMulticast,
+ 				    serverRTPPort, serverRTCPPort,
+ 				    fStreamStates[trackNum].streamToken);
++
++    if (fStreamStates[trackNum].streamToken == NULL) {
++      // The subsession failed to set up the stream (e.g. it could not
++      // allocate server ports, or the backchannel sink could not be
++      // created). Fail the SETUP cleanly with an error response instead
++      // of sending a bogus "200 OK" with server_port=0-0.
++      // NOTE (yi-hack-v5 fork, 2026-11-17): stock live555 never checks
++      // this — getStreamParameters() returns void, and a NULL streamToken
++      // is its only failure signal. Without this check the failure
++      // paths added in OnDemandServerMediaSubsession(_BC).cpp would
++      // still yield "200 OK". (streamingModeString is freed here
++      // because 'break' skips the delete at the end of this block.)
++      fOurClientConnection->setRTSPResponse("500 Internal Server Error");
++      delete[] streamingModeString;
++      break;
++    }
+     
+     AddressString destAddrStr(destinationAddress);
+     AddressString sourceAddrStr(sourceAddr);

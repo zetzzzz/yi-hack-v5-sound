@@ -1,0 +1,226 @@
+/*
+ * Copyright (c) 2026 roleo.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * File sink that converts ADTS to PCM
+ */
+
+#include "ADTS2PCMFileSink.hh"
+#include "GroupsockHelper.hh"
+#include "OutputFile.hh"
+#include "rRTSPServer.h"
+
+#include "fdk-aac/aacdecoder_lib.h"
+
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
+////////// ADTS2PCMFileSink //////////
+
+extern int debug;
+
+// Open the output fifo O_WRONLY | O_NONBLOCK:
+// open() never blocks the event loop; if nobody is reading the fifo it
+// fails immediately (ENXIO) instead of hanging until a reader appears
+static FILE* openOutputFifo(UsageEnvironment& env, char const* fileName) {
+    int fd = open(fileName, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        fprintf(stderr, "%lld: unable to open output fifo %s: %s\n",
+                current_timestamp(), fileName, strerror(errno));
+        env.setResultMsg("unable to open output fifo \"", fileName, "\"");
+        return NULL;
+    }
+    FILE* fid = fdopen(fd, "wb");
+    if (fid == NULL) {
+        close(fd);
+        env.setResultMsg("unable to fdopen output fifo \"", fileName, "\"");
+    }
+
+    return fid;
+}
+
+unsigned samplingFrequencyTable[16] = {
+    96000, 88200, 64000, 48000,
+    44100, 32000, 24000, 22050,
+    16000, 12000, 11025, 8000,
+    7350, 0, 0, 0
+};
+
+ADTS2PCMFileSink::ADTS2PCMFileSink(UsageEnvironment& env, FILE* fid,
+                                   int sampleRate, int numChannels,
+                                   unsigned bufferSize)
+    : FileSink(env, fid, bufferSize, NULL), fSampleRate(sampleRate),
+      fNumChannels(numChannels), fPacketCounter(0), fOutputClosed(False) {
+
+    if (debug & 16) fprintf(stderr, "%lld: ADTS2PCMFileSink - Starting sink\n", current_timestamp());
+
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (sampleRate == (signed) samplingFrequencyTable[i]) {
+            fSampleRateIndex = i;
+            break;
+        }
+    }
+    if (i == 16) fSampleRateIndex = 8;
+
+    fChannelConfiguration = fNumChannels;
+    if (fChannelConfiguration == 8) fChannelConfiguration--;
+
+    // Construct the 'AudioSpecificConfig', and from it, the corresponding ASCII string:
+    unsigned char audioSpecificConfig[2];
+    unsigned int profile = 1;
+    u_int8_t const audioObjectType = profile + 1;
+    audioSpecificConfig[0] = (audioObjectType << 3) | (fSampleRateIndex >> 1);
+    audioSpecificConfig[1] = (fSampleRateIndex << 7) | (fChannelConfiguration << 3);
+    sprintf(fConfigStr, "%02X%02X", audioSpecificConfig[0], audioSpecificConfig[1]);
+
+    fAACHandle = aacDecoder_Open(TT_MP4_ADTS, 1);
+    if (fAACHandle == NULL) {
+        fprintf(stderr, "Couldn't open AAC decoder\n");
+    }
+}
+
+ADTS2PCMFileSink::~ADTS2PCMFileSink() {
+    if (fAACHandle != NULL) aacDecoder_Close(fAACHandle);
+}
+
+ADTS2PCMFileSink* ADTS2PCMFileSink::createNew(UsageEnvironment& env,
+                                              char const* fileName,
+                                              int sampleRate, int numChannels,
+                                              unsigned bufferSize) {
+    do {
+        FILE* fid;
+        fid = openOutputFifo(env, fileName);
+        if (fid == NULL) break;
+
+        return new ADTS2PCMFileSink(env, fid, sampleRate, numChannels, bufferSize);
+    } while (0);
+
+    return NULL;
+}
+
+char* ADTS2PCMFileSink::getConfigStr() {
+    return fConfigStr;
+}
+
+Boolean ADTS2PCMFileSink::continuePlaying() {
+    // Call parent
+    return FileSink::continuePlaying();
+}
+
+void ADTS2PCMFileSink::addData(unsigned char const* data, unsigned dataSize,
+                               struct timeval presentationTime) {
+    if (debug & 16) fprintf(stderr, "%lld: ADTS2PCMFileSink - addData - size: %u\n", current_timestamp(), dataSize);
+
+    // Write to our file:
+    if (fOutFid != NULL && data != NULL) {
+
+        unsigned char aacHeader[7];
+        unsigned char *aacHeaderPtr = &aacHeader[0];
+        unsigned int aacHeaderSize = 7;
+        AAC_DECODER_ERROR err;
+        unsigned int valid;
+        int i;
+
+        // NOTE (yi-hack-v5 port): the 2023 FileSink base class passes the
+        // frame as "unsigned char const*", but fdk-aac's aacDecoder_Fill()
+        // takes "unsigned char**" (it does not modify the buffer). The
+        // const is cast away on our own frame buffer only.
+        unsigned char* dataPtr = const_cast<unsigned char*>(data);
+
+        dataSize = dataSize + aacHeaderSize;
+        aacHeader[0] = 0xFF;
+        aacHeader[1] = 0xF1;
+        aacHeader[2] = 0x40 | ((fSampleRateIndex << 2) & 0x3c) | ((fChannelConfiguration >> 2) & 0x03);
+        aacHeader[3] = ((fChannelConfiguration << 6) & 0xc0) | ((dataSize >> 11) & 0x3);
+        aacHeader[4] = (dataSize >> 3) & 0xff;
+        aacHeader[5] = ((dataSize << 5) & 0xe0) | 0x1f;
+        aacHeader[6] = 0xfc;
+        dataSize = dataSize - aacHeaderSize;
+
+        valid = aacHeaderSize;
+        err = aacDecoder_Fill(fAACHandle, &aacHeaderPtr, &aacHeaderSize, &valid);
+        if (err != AAC_DEC_OK) {
+            fprintf(stderr, "Fill failed: %x\n", err);
+            return;
+        }
+        valid = dataSize;
+        err = aacDecoder_Fill(fAACHandle, &dataPtr, &dataSize, &valid);
+        if (err != AAC_DEC_OK) {
+            fprintf(stderr, "Fill failed: %x\n", err);
+            return;
+        }
+
+        err = aacDecoder_DecodeFrame(fAACHandle, fPCMBuffer, 1024, 0);
+//        if (err == AAC_DEC_NOT_ENOUGH_BITS)
+//            return;
+        if (err != AAC_DEC_OK) {
+            fprintf(stderr, "Decode failed: %x\n", err);
+            return;
+        }
+        CStreamInfo *info = aacDecoder_GetStreamInfo(fAACHandle);
+        if (debug & 16) {
+            fprintf(stderr, "Sample Rate: %d\n", info->sampleRate);
+            fprintf(stderr, "Frame Size: %d\n", info->frameSize);
+            fprintf(stderr, "Num Channels: %d\n", info->numChannels);
+        }
+
+        if (fSampleRate == info->sampleRate / 2) {
+            for (i = 0; i < info->frameSize / 2; i++) {
+                fPCMBuffer[i] = fPCMBuffer[2 * i];
+            }
+            writeNonBlocking(fPCMBuffer, (info->frameSize / 2) * sizeof(u_int16_t));
+        } else {
+            writeNonBlocking(fPCMBuffer, info->frameSize * sizeof(u_int16_t));
+        }
+    }
+}
+
+void ADTS2PCMFileSink::writeNonBlocking(void const* buf, unsigned nbytes) {
+    if (fOutFid == NULL || nbytes == 0) return;
+    ssize_t n = write(fileno(fOutFid), buf, nbytes);
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        // Reader gone (EPIPE) or bad fd: mark the output as closed.
+        fOutputClosed = True;
+    }
+    // Partial writes / EAGAIN (fifo-full): intentionally drop the excess
+}
+
+void ADTS2PCMFileSink::afterGettingFrame(unsigned frameSize,
+                                         unsigned numTruncatedBytes,
+                                         struct timeval presentationTime) {
+
+    if (debug & 16) fprintf(stderr, "%lld: ADTS2PCMFileSink - afterGettingFrame\n", current_timestamp());
+
+    if (numTruncatedBytes > 0) {
+        fprintf(stderr, "%lld: ADTS2PCMFileSink::afterGettingFrame(): The input frame data was too large for our buffer size (%d).\n", current_timestamp(), fBufferSize);
+        fprintf(stderr, "%lld: %d bytes of trailing data was dropped! Correct this by increasing the \"bufferSize\" parameter in the \"createNew()\" call to at least %d\n",
+                current_timestamp(), numTruncatedBytes, fBufferSize + numTruncatedBytes);
+    }
+    addData(fBuffer, frameSize, presentationTime);
+
+    if (fOutFid == NULL || fOutputClosed) {
+        // The output fifo has closed.  Handle this the same way as if the input source had closed:
+        if (fSource != NULL) fSource->stopGettingFrames();
+        onSourceClosure();
+        return;
+    }
+
+    // Then try getting the next frame:
+    continuePlaying();
+}

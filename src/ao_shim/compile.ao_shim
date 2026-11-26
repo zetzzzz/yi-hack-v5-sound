@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# NOTE (yi-hack-v5 fork): the hisiv300 toolchain (/opt/arm-hisiv300-linux)
+# is not obtainable, so this uses the Debian arm-linux-gnueabi toolchain.
+# The shim is built -nostdlib with raw syscalls only: the camera runs
+# uClibc, so a glibc-linked .so would not load there. The .so is NOT
+# stripped — a clean rebuild must reproduce the verified sha256
+# a13150434b65f8561f3230458199d6fea3fdb244365c93289bb87d5e22d330ef
+# (logging-shim build + review fixes, 2026-11-17; previous hash beb11047… was first logging build).
+export CROSSPATH=/usr/bin
+export PATH=${PATH}:${CROSSPATH}
+
+export TARGET=arm-linux-gnueabi
+export CROSS=arm-linux-gnueabi
+export BUILD=x86_64-pc-linux-gnu
+
+export CROSSPREFIX=${CROSS}-
+export CC=${CROSSPREFIX}gcc
+
+SCRIPT_DIR=$(cd `dirname $0` && pwd)
+cd $SCRIPT_DIR
+
+make clean
+make || exit 1
+make check || exit 1
+
+mkdir -p ./_install/lib || exit 1
+
+cp ./libao_shim.so ./_install/lib || exit 1

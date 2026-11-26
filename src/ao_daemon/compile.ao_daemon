@@ -1,0 +1,28 @@
+#!/bin/bash
+#
+# compile.ao_daemon — build the standalone speaker daemon.
+#
+#   ./compile.ao_daemon        -> ao_daemon        (real /dev/ao ioctls)
+#   ./compile.ao_daemon test   -> ao_daemon_test   (-DAO_DAEMON_TEST, AO
+#                                ioctl layer stubbed; see README.md)
+#
+# Toolchain: arm-linux-gnueabi-gcc 13.3.0 (Debian), -static. The camera
+# runs uClibc, so a glibc-linked binary would not run there; a fully
+# static binary runs fine, as proven by the ao_tone_test.
+set -e
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+cd "$SCRIPT_DIR"
+
+export PATH="$PATH:/usr/bin"
+CC=arm-linux-gnueabi-gcc
+
+if [ "$1" = "test" ]; then
+    echo "[compile] building ao_daemon_test (AO_DAEMON_TEST stub mode)"
+    $CC -static -O2 -DAO_DAEMON_TEST -o ao_daemon_test ao_daemon.c -lm
+    echo "[compile] done: ao_daemon_test"
+else
+    echo "[compile] building ao_daemon (real AO ioctls)"
+    $CC -static -O2 -o ao_daemon ao_daemon.c -lm
+    echo "[compile] done: ao_daemon"
+fi
