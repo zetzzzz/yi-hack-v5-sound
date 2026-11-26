@@ -1,9 +1,11 @@
 # yi-hack-v5 — fork with two-way audio (RTSP backchannel)
 
 > **Fork of [alienatedsec/yi-hack-v5](https://github.com/alienatedsec/yi-hack-v5) (based on release 0.4.1).**
-> This fork adds a working **RTSP audio backchannel** and a standalone **speaker daemon**, so a Yi 1080p Home camera can talk back — usable from Home Assistant / go2rtc / WebRTC two-way talk.
+> This fork adds a working **RTSP audio backchannel** and a standalone **speaker daemon**, so a Yi 1080p Home (y20) or Yi Dome (v201) camera can talk back — usable from Home Assistant / go2rtc / WebRTC two-way talk.
 >
-> Verified end-to-end on 2026-11-17 on a Yi 1080p Home 48US (y20): voice spoken into the browser is heard from the camera speaker (ear-confirmed, full-duplex in practice).
+> Verified end-to-end on 2026-11-17 on a Yi 1080p Home 48US (y20): voice spoken into the browser is heard from the camera speaker (ear-confirmed, full-duplex in practice). Verified on 2026-11-26 on a Yi Dome 720p (v201): RTSP backchannel (G.711 ulaw, sendonly PT 0) live, 100-packet PCMU test delivered 65 frames to the speaker with no errors, and a 1 kHz tone test was ear-confirmed from the Dome speaker. The audio binaries are statically linked and model-independent — the same `rRTSPServer` + `ao_daemon` run on both models.
+>
+> Per-model packages (mirroring upstream's release layout): `yi_home_1080p_0.4.1-sound.tgz` (y20, Yi 1080p Home) and `yi_dome_0.4.1-sound.tgz` (v201, Yi Dome) — each bundles the model firmware (`rootfs_*` + `home_*`) with this fork's audio-enabled `yi-hack-v5` folder.
 
 ## What this fork adds
 
